@@ -25,8 +25,6 @@ void ahoywifi::setup(settings_t *config, uint32_t *utcTimestamp, appWifiCb cb) {
     mStaConn    = DISCONNECTED;
     mCnt        = 0;
     mScanActive = false;
-    mLastApClients = 0;
-    mScanCnt = 0;
 
     #if defined(ESP8266)
     wifiConnectHandler = WiFi.onStationModeConnected(std::bind(&ahoywifi::onConnect, this, std::placeholders::_1));
@@ -66,35 +64,27 @@ void ahoywifi::tickWifiLoop() {
     #if !defined(AP_ONLY)
     if(mStaConn != GOT_IP) {
         if (WiFi.softAPgetStationNum() > 0) { // do not reconnect if any AP connection exists
-            if(WIFI_AP_STA == WiFi.getMode()) {
-                 // first time switch to AP Mode
-                if(mScanActive && (mLastApClients != WiFi.softAPgetStationNum()))
-                    mScanActive = false;
-
-                // scan is finished
-                if(!mScanActive) {
-                    WiFi.mode(WIFI_AP);
-                    mDns.start(53, "*", mApIp);
-                }
-
-                // only once a client connects to AP
-                if(mLastApClients != WiFi.softAPgetStationNum()) {
-                    mLastApClients = WiFi.softAPgetStationNum();
+            if(mStaConn != IN_AP_MODE) {
+                mStaConn = IN_AP_MODE;
+                // first time switch to AP Mode
+                if (mScanActive) {
                     WiFi.scanDelete();
-                    mAppWifiCb(false);
-                    DBGPRINTLN(F("AP client connected"));
-                    welcome(mApIp.toString());
+                    mScanActive = false;
                 }
+                DBGPRINTLN(F("AP client connected"));
+                welcome(mApIp.toString());
+                WiFi.mode(WIFI_AP);
+                mDns.start(53, "*", mApIp);
+                mAppWifiCb(true);
             }
             mDns.processNextRequest();
             return;
         }
-        else if(WIFI_AP == WiFi.getMode()) {
-            mLastApClients = 0;
+        else if(mStaConn == IN_AP_MODE) {
             mCnt = 0;
-            DPRINTLN(DBG_INFO, "DNS stop");
             mDns.stop();
             WiFi.mode(WIFI_AP_STA);
+            mStaConn = DISCONNECTED;
         }
         mCnt++;
 
@@ -120,9 +110,9 @@ void ahoywifi::tickWifiLoop() {
         DBGPRINTLN(F(" seconds"));
         if(mScanActive) {
             getBSSIDs();
-            //if(!mScanActive)        // scan completed
-            //    if ((mCnt % timeout) < 8)
-            //        mCnt = timeout - 2;
+            if(!mScanActive)        // scan completed
+                if ((mCnt % timeout) < timeout - 2)
+                    mCnt = timeout - 2;
         }
         if((mCnt % timeout) == 0) { // try to reconnect after x sec without connection
             if(mStaConn != CONNECTED)
@@ -166,8 +156,6 @@ void ahoywifi::setupAp(void) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAPConfig(mApIp, mApIp, IPAddress(255, 255, 255, 0));
     WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PWD);
-
-    mDns.start(53, "*", mApIp);
 }
 
 
@@ -266,10 +254,10 @@ void ahoywifi::sortRSSI(int *sort, int n) {
 
 //-----------------------------------------------------------------------------
 void ahoywifi::scanAvailNetworks(void) {
-    if(-2 == WiFi.scanComplete()) {
+    if(!mScanActive) {
         mScanActive = true;
         if(WIFI_AP == WiFi.getMode())
-            WiFi.mode(WIFI_AP_STA);
+          WiFi.mode(WIFI_AP_STA);
         WiFi.scanNetworks(true);
     }
 }
@@ -291,12 +279,14 @@ void ahoywifi::getAvailNetworks(JsonObject obj) {
     }
     mScanActive = false;
     WiFi.scanDelete();
+    if(mStaConn == IN_AP_MODE)
+        WiFi.mode(WIFI_AP);
 }
 
 //-----------------------------------------------------------------------------
 void ahoywifi::getBSSIDs() {
     int n = WiFi.scanComplete();
-    if (n < 0){
+    if (n < 0) {
         mScanCnt++;
         if (mScanCnt < 20)
             return;
@@ -336,7 +326,6 @@ void ahoywifi::connectionEvent(WiFiStatus_t status) {
                  mScanActive = false;
             }
             welcome(WiFi.localIP().toString() + F(" (Station)"));
-            mDns.stop();
             WiFi.mode(WIFI_STA);
             DBGPRINTLN(F("[WiFi] AP disabled"));
             mAppWifiCb(true);
